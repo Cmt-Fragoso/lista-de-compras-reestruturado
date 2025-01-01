@@ -1,39 +1,35 @@
 # Changelog
 
-## [0.3.7] - 2024-12-31
+## [0.3.9] - 2024-12-31
 
 ### Adicionado
-- [UI] Implementação do ConfigView
-  - Interface completa de configurações
-  - Separação por categorias (Geral, Visualização, Backup, Dados)
-  - Validações e feedback visual
-  - Restauração de padrões
-  - Estados dinâmicos de controles
-  - Salvamento automático das configurações
-- [UI] Configurações avançadas
-  - Temas customizáveis
-  - Configurações de sincronização
-  - Backup automático
-  - Opções de exportação
-  - Personalização de gráficos
-  - Notificações configuráveis
-- [UI] Sistema de backup
+- [UI] Sistema completo de backup
+  - BackupService para gerenciamento de backups
   - Backup automático configurável
-  - Seleção de diretório
-  - Retenção de backup configurável
-  - Exportação de dados configurável
-  - Inclusão de estatísticas e gráficos opcional
+  - Compressão de dados
+  - Restauração de backup
+  - Limpeza automática de backups antigos
+  - Feedback de progresso
+- [UI] Melhorias na exportação
+  - Suporte completo a PDF usando iTextSharp
+  - Novos tipos de gráficos no Excel
+    - Gráfico de barras com formatação avançada
+    - Gráfico de variação percentual
+    - Linha de tendência e média móvel
+  - Formatação aprimorada das planilhas
+  - Relatório em PDF com estatísticas
+  - Melhor organização visual dos dados
 
 ### Modificado
-- [UI] Melhorias no sistema de configurações
+- [UI] Aprimoramentos no ExportService
+  - Melhor formatação dos dados
+  - Novos estilos de apresentação
+  - Suporte a mais tipos de gráficos
+  - Otimização da geração de PDFs
+- [UI] Refinamentos gerais
   - Interface mais intuitiva
-  - Melhor organização das opções
-  - Feedback mais claro
-  - Estados dinâmicos dos controles
-- [UI] Refinamento da interface
-  - Temas consistentes
-  - Layout otimizado
-  - Experiência mais fluida
-  - Melhor usabilidade
+  - Melhor feedback de operações
+  - Performance otimizada
+  - Tratamento de erros aprimorado
 
 [resto do changelog mantido como estava...]

@@ -24,24 +24,35 @@
   - [x] ListasView
   - [x] ItemEditForm
   - [x] PrecosView
-  - [ ] ConfigView
+  - [x] ConfigView
+  - [x] BackupManagerForm
 - [x] Desenvolver controles customizados
   - [x] BaseButton
   - [x] BaseTextBox
   - [x] BaseListView
   - [x] BaseComboBox
   - [x] BaseDataGrid
+  - [x] BaseChart
 - [x] Implementar temas
   - [x] ThemeManager
   - [x] ThemeColors
-  - [ ] Seletor de temas
-- [ ] Criar recursos visuais
-  - [ ] Ícones
-  - [ ] Gráficos de preços
+  - [x] Seletor de temas
+- [ ] Otimizar recursos visuais
+  - [ ] Ícones customizados
+  - [ ] Aprimorar gráficos de preços
   - [x] Indicadores visuais
-- [ ] Otimizar interface
-- [ ] Implementar responsividade
-- [ ] Documentar componentes
+- [ ] Otimizações de performance
+  - [ ] Melhorar tempo de resposta UI
+  - [ ] Reduzir uso de memória
+  - [ ] Otimizar renderização
+- [ ] Melhorar responsividade
+  - [ ] Adaptar layouts para diferentes resoluções
+  - [ ] Implementar redimensionamento fluido
+  - [ ] Otimizar para DPI variados
+- [ ] Completar documentação
+  - [ ] Documentar componentes customizados
+  - [ ] Criar guia de estilos
+  - [ ] Documentar padrões de UI
 
 ## Chat 4 - Engenheiro de Rede
 - [ ] Implementar descoberta P2P
@@ -64,17 +75,17 @@
 ## Geral
 - [x] Setup inicial do projeto
 - [x] Configuração de ambiente
-- [ ] Primeira release funcional
+- [x] Primeira release funcional
 - [ ] Testes em produção
 - [ ] Documentação de usuário
 - [ ] Deploy inicial
 - [ ] Feedback dos usuários
 
 ## Futuras Implementações
-- [ ] Sistema de backup
-- [ ] Exportação de dados
+- [x] Sistema de backup
+- [x] Exportação de dados
 - [ ] Análises avançadas
-- [ ] Relatórios customizados
-- [ ] Melhorias de UX
-- [ ] Otimizações de performance
+- [ ] Relatórios customizados avançados
+- [ ] Melhorias de UX baseadas em feedback
+- [ ] Otimizações de performance contínuas
 - [ ] Expansão de funcionalidades
