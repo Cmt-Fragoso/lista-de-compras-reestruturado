@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.4.0] - 2025-01-01
+
+### Adicionado
+- [UI] Sistema de ícones vetoriais
+  - 15 ícones básicos vetorizados
+  - Cache inteligente
+  - Suporte a DPI
+  - Renderização otimizada
+
+- [UI] Otimizações de performance
+  - Sistema de buffering avançado
+  - Virtualização automática
+  - Gerenciamento de memória
+  - Atualizações assíncronas
+  - Redução de redraws
+
+- [UI] Melhorias de responsividade
+  - Layouts adaptativos
+  - Suporte a múltiplos DPIs
+  - Redimensionamento fluido
+  - Escala automática de fontes
+
+### Documentação
+- Guia completo de componentes UI
+- Documentação de padrões visuais
+- Guia de estilos e temas
+- Exemplos de uso
+
 ## [0.3.9] - 2024-12-31
 
 ### Adicionado
@@ -31,5 +59,3 @@
   - Melhor feedback de operações
   - Performance otimizada
   - Tratamento de erros aprimorado
-
-[resto do changelog mantido como estava...]

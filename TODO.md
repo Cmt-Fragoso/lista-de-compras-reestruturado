@@ -37,22 +37,22 @@
   - [x] ThemeManager
   - [x] ThemeColors
   - [x] Seletor de temas
-- [ ] Otimizar recursos visuais
-  - [ ] Ícones customizados
-  - [ ] Aprimorar gráficos de preços
+- [x] Otimizar recursos visuais
+  - [x] Ícones customizados
+  - [x] Aprimorar gráficos de preços
   - [x] Indicadores visuais
-- [ ] Otimizações de performance
-  - [ ] Melhorar tempo de resposta UI
-  - [ ] Reduzir uso de memória
-  - [ ] Otimizar renderização
-- [ ] Melhorar responsividade
-  - [ ] Adaptar layouts para diferentes resoluções
-  - [ ] Implementar redimensionamento fluido
-  - [ ] Otimizar para DPI variados
-- [ ] Completar documentação
-  - [ ] Documentar componentes customizados
-  - [ ] Criar guia de estilos
-  - [ ] Documentar padrões de UI
+- [x] Otimizações de performance
+  - [x] Melhorar tempo de resposta UI
+  - [x] Reduzir uso de memória
+  - [x] Otimizar renderização
+- [x] Melhorar responsividade
+  - [x] Adaptar layouts para diferentes resoluções
+  - [x] Implementar redimensionamento fluido
+  - [x] Otimizar para DPI variados
+- [x] Completar documentação
+  - [x] Documentar componentes customizados
+  - [x] Criar guia de estilos
+  - [x] Documentar padrões de UI
 
 ## Chat 4 - Engenheiro de Rede
 - [ ] Implementar descoberta P2P

@@ -2,21 +2,36 @@ using System;
 using System.Drawing;
 using System.Windows.Forms;
 using System.Collections.Generic;
+using System.Linq;
 using ListaCompras.UI.Themes;
+using System.Drawing.Drawing2D;
+using System.Threading.Tasks;
 
 namespace ListaCompras.UI.Controls
 {
     public class PriceChart : BaseChart
     {
-        private bool _showMMA = false; // Média Móvel Aritmética
-        private int _mmaperiod = 5;    // Período da média móvel
+        #region Fields
+        private bool _showMMA = false;
+        private int _mmaperiod = 5;
         private bool _showVolatility = false;
         private List<double> _volumes = new List<double>();
+        private BufferedGraphics _graphicsBuffer;
+        private readonly object _lockObject = new object();
+        private Dictionary<string, List<PointF>> _cachedLines = new Dictionary<string, List<PointF>>();
+        private bool _isDirty = true;
+        private Rectangle _lastChartArea;
+        private double _lastMin, _lastMax;
+        private readonly Timer _redrawTimer;
+        private readonly Timer _tooltipTimer;
+        private ToolTip _currentTooltip;
+        #endregion
 
+        #region Properties
         public bool ShowMovingAverage
         {
             get => _showMMA;
-            set { _showMMA = value; Invalidate(); }
+            set { _showMMA = value; InvalidateCache(); }
         }
 
         public int MovingAveragePeriod
@@ -27,7 +42,7 @@ namespace ListaCompras.UI.Controls
                 if (value >= 2)
                 {
                     _mmaperiod = value;
-                    Invalidate();
+                    InvalidateCache();
                 }
             }
         }
@@ -35,159 +50,298 @@ namespace ListaCompras.UI.Controls
         public bool ShowVolatility
         {
             get => _showVolatility;
-            set { _showVolatility = value; Invalidate(); }
+            set { _showVolatility = value; InvalidateCache(); }
         }
+        #endregion
 
+        #region Constructor
+        public PriceChart() : base()
+        {
+            SetStyle(ControlStyles.OptimizedDoubleBuffer | 
+                    ControlStyles.AllPaintingInWmPaint | 
+                    ControlStyles.UserPaint, true);
+
+            _redrawTimer = new Timer { Interval = 16 }; // ~60 FPS
+            _redrawTimer.Tick += (s, e) => {
+                _redrawTimer.Stop();
+                Invalidate();
+            };
+
+            _tooltipTimer = new Timer { Interval = 500 };
+            _tooltipTimer.Tick += (s, e) => {
+                _tooltipTimer.Stop();
+                ShowPriceDetails(PointToClient(MousePosition));
+            };
+
+            SizeChanged += (s, e) => InvalidateCache();
+            ThemeManager.Instance.ThemeChanged += (s, e) => InvalidateCache();
+        }
+        #endregion
+
+        #region Public Methods
         public void SetPriceData(List<double> prices, List<DateTime> dates, List<double> volumes = null)
         {
             if (prices == null || dates == null || prices.Count != dates.Count)
                 throw new ArgumentException("Dados inválidos");
 
-            SetData(prices);
-            SetLabels(dates.ConvertAll(d => d.ToString("dd/MM")));
-            _volumes = volumes ?? new List<double>();
-            
-            ShowMinMax = true;
-            ShowPercentageChange = true;
-            EnableZoom = true;
-            
-            Invalidate();
+            lock (_lockObject)
+            {
+                SetData(prices);
+                SetLabels(dates.ConvertAll(d => d.ToString("dd/MM")));
+                _volumes = volumes ?? new List<double>();
+                
+                ShowMinMax = true;
+                ShowPercentageChange = true;
+                EnableZoom = true;
+                
+                InvalidateCache();
+            }
         }
 
+        public override void Invalidate()
+        {
+            _isDirty = true;
+            base.Invalidate();
+        }
+
+        private void InvalidateCache()
+        {
+            lock (_lockObject)
+            {
+                _cachedLines.Clear();
+                _isDirty = true;
+                _redrawTimer.Stop();
+                _redrawTimer.Start();
+            }
+        }
+        #endregion
+
+        #region Protected Methods
         protected override void OnPaint(PaintEventArgs e)
         {
-            base.OnPaint(e);
-
             var theme = ThemeManager.Instance.CurrentTheme;
             var chartArea = CalculateChartArea();
 
-            if (_showMMA)
-                DrawMovingAverage(e.Graphics, chartArea, theme);
+            if (_graphicsBuffer == null || _isDirty || 
+                _lastChartArea != chartArea || 
+                _lastMin != _data.Min() || 
+                _lastMax != _data.Max())
+            {
+                CreateBuffer(e.Graphics);
+                DrawToBuffer(theme, chartArea);
+            }
 
-            if (_showVolatility)
-                DrawVolatility(e.Graphics, chartArea, theme);
+            // Renderiza o buffer
+            _graphicsBuffer.Render(e.Graphics);
         }
 
-        private void DrawMovingAverage(Graphics g, Rectangle chartArea, ThemeColors theme)
+        protected override void OnMouseMove(MouseEventArgs e)
         {
-            if (_data.Count < _mmaperiod) return;
+            base.OnMouseMove(e);
+            
+            _tooltipTimer.Stop();
+            _tooltipTimer.Start();
+        }
 
-            var mma = CalculateMovingAverage();
-            double min = _data.Min();
-            double max = _data.Max();
-            float xStep = chartArea.Width / (float)(_data.Count - 1);
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                _graphicsBuffer?.Dispose();
+                _redrawTimer?.Dispose();
+                _tooltipTimer?.Dispose();
+                _currentTooltip?.Dispose();
+            }
+            base.Dispose(disposing);
+        }
+        #endregion
+
+        #region Private Methods
+        private void CreateBuffer(Graphics g)
+        {
+            _graphicsBuffer?.Dispose();
+            
+            var context = BufferedGraphicsManager.Current;
+            context.MaximumBuffer = new Size(Width + 1, Height + 1);
+            _graphicsBuffer = context.Allocate(g, ClientRectangle);
+            
+            _graphicsBuffer.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            _graphicsBuffer.Graphics.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+        }
+
+        private void DrawToBuffer(ThemeColors theme, Rectangle chartArea)
+        {
+            var g = _graphicsBuffer.Graphics;
+            
+            // Limpa o buffer
+            using (var backBrush = new SolidBrush(theme.Background))
+            {
+                g.FillRectangle(backBrush, ClientRectangle);
+            }
+
+            // Desenha o gráfico base
+            base.OnPaint(new PaintEventArgs(g, ClientRectangle));
+
+            if (_showMMA)
+                DrawMovingAverageAsync(g, chartArea, theme);
+
+            if (_showVolatility)
+                DrawVolatilityAsync(g, chartArea, theme);
+
+            _lastChartArea = chartArea;
+            _lastMin = _data.Min();
+            _lastMax = _data.Max();
+            _isDirty = false;
+        }
+
+        private async void DrawMovingAverageAsync(Graphics g, Rectangle chartArea, ThemeColors theme)
+        {
+            const string cacheKey = "mma";
+            List<PointF> points;
+
+            if (_cachedLines.ContainsKey(cacheKey))
+            {
+                points = _cachedLines[cacheKey];
+            }
+            else
+            {
+                points = await Task.Run(() => {
+                    var mma = CalculateMovingAverage();
+                    return GetPointsFromData(mma, chartArea);
+                });
+
+                lock (_lockObject)
+                {
+                    _cachedLines[cacheKey] = points;
+                }
+            }
 
             using (var pen = new Pen(theme.Info, 2f))
             {
-                var points = new List<PointF>();
-                for (int i = _mmaperiod - 1; i < mma.Count; i++)
-                {
-                    float x = chartArea.Left + (xStep * i);
-                    float y = chartArea.Bottom - 
-                        (float)((mma[i] - min) / (max - min) * chartArea.Height);
-                    points.Add(new PointF(x, y));
-                }
+                g.DrawLines(pen, points.ToArray());
+            }
 
-                if (points.Count > 1)
-                {
-                    g.DrawLines(pen, points.ToArray());
-                }
+            // Desenha legenda
+            string label = $"MMA({_mmaperiod})";
+            var size = g.MeasureString(label, Font);
+            using (var brush = new SolidBrush(theme.Info))
+            {
+                g.DrawString(label, Font, brush,
+                    chartArea.Left + 5,
+                    chartArea.Top + 5);
+            }
+        }
 
-                // Desenha legenda da MMA
-                string label = $"MMA({_mmaperiod})";
-                var size = g.MeasureString(label, Font);
-                using (var brush = new SolidBrush(theme.Info))
+        private async void DrawVolatilityAsync(Graphics g, Rectangle chartArea, ThemeColors theme)
+        {
+            const string cacheKey = "volatility";
+            List<PointF> points;
+
+            if (_cachedLines.ContainsKey(cacheKey))
+            {
+                points = _cachedLines[cacheKey];
+            }
+            else
+            {
+                points = await Task.Run(() => {
+                    var volatility = CalculateVolatility();
+                    return GetPointsFromData(volatility, chartArea);
+                });
+
+                lock (_lockObject)
                 {
-                    g.DrawString(label, Font, brush,
-                        chartArea.Left + 5,
-                        chartArea.Top + 5);
+                    _cachedLines[cacheKey] = points;
                 }
             }
+
+            using (var brush = new SolidBrush(Color.FromArgb(64, theme.Warning.R, theme.Warning.G, theme.Warning.B)))
+            {
+                float xStep = chartArea.Width / (float)(points.Count - 1);
+                float heightScale = chartArea.Height * 0.2f;
+
+                for (int i = 0; i < points.Count; i++)
+                {
+                    var point = points[i];
+                    var rect = new RectangleF(
+                        point.X - (xStep / 4),
+                        point.Y,
+                        xStep / 2,
+                        chartArea.Bottom - point.Y);
+
+                    g.FillRectangle(brush, rect);
+                }
+            }
+
+            // Desenha legenda
+            string label = "Volatilidade";
+            var size = g.MeasureString(label, Font);
+            using (var brush = new SolidBrush(theme.Warning))
+            {
+                g.DrawString(label, Font, brush,
+                    chartArea.Right - size.Width - 5,
+                    chartArea.Bottom - size.Height - 5);
+            }
+        }
+
+        private List<PointF> GetPointsFromData(List<double> data, Rectangle chartArea)
+        {
+            if (data.Count == 0) return new List<PointF>();
+
+            double min = data.Min();
+            double max = data.Max();
+            float xStep = chartArea.Width / (float)(data.Count - 1);
+
+            return data.Select((value, index) => new PointF(
+                chartArea.Left + (xStep * index),
+                chartArea.Bottom - (float)((value - min) / (max - min) * chartArea.Height)
+            )).ToList();
         }
 
         private List<double> CalculateMovingAverage()
         {
-            var result = new List<double>();
-            for (int i = 0; i < _data.Count; i++)
+            if (_data.Count < _mmaperiod)
+                return new List<double>();
+
+            var result = new double[_data.Count];
+            double sum = 0;
+
+            // Primeira média
+            for (int i = 0; i < _mmaperiod; i++)
+                sum += _data[i];
+            result[_mmaperiod - 1] = sum / _mmaperiod;
+
+            // Médias subsequentes usando janela deslizante
+            for (int i = _mmaperiod; i < _data.Count; i++)
             {
-                if (i < _mmaperiod - 1)
-                {
-                    result.Add(0);
-                    continue;
-                }
-
-                double sum = 0;
-                for (int j = 0; j < _mmaperiod; j++)
-                {
-                    sum += _data[i - j];
-                }
-                result.Add(sum / _mmaperiod);
+                sum = sum - _data[i - _mmaperiod] + _data[i];
+                result[i] = sum / _mmaperiod;
             }
-            return result;
-        }
 
-        private void DrawVolatility(Graphics g, Rectangle chartArea, ThemeColors theme)
-        {
-            if (_data.Count < 2) return;
-
-            var volatility = CalculateVolatility();
-            double maxVol = volatility.Max();
-            
-            using (var brush = new SolidBrush(Color.FromArgb(64, theme.Warning.R, theme.Warning.G, theme.Warning.B)))
-            {
-                float xStep = chartArea.Width / (float)(_data.Count - 1);
-                float heightScale = chartArea.Height * 0.2f; // Usa 20% da altura para volatilidade
-
-                for (int i = 1; i < volatility.Count; i++)
-                {
-                    float x = chartArea.Left + (xStep * i);
-                    float height = (float)(volatility[i] / maxVol * heightScale);
-                    
-                    var rect = new RectangleF(
-                        x - (xStep / 4),
-                        chartArea.Bottom - height,
-                        xStep / 2,
-                        height);
-
-                    g.FillRectangle(brush, rect);
-                }
-
-                // Desenha legenda da volatilidade
-                string label = "Volatilidade";
-                var size = g.MeasureString(label, Font);
-                using (var textBrush = new SolidBrush(theme.Warning))
-                {
-                    g.DrawString(label, Font, textBrush,
-                        chartArea.Right - size.Width - 5,
-                        chartArea.Bottom - size.Height - 5);
-                }
-            }
+            return result.ToList();
         }
 
         private List<double> CalculateVolatility()
         {
-            var volatility = new List<double> { 0 }; // Primeiro ponto não tem volatilidade
-            
-            for (int i = 1; i < _data.Count; i++)
-            {
-                double previousPrice = _data[i - 1];
-                double currentPrice = _data[i];
-                double percentChange = Math.Abs((currentPrice - previousPrice) / previousPrice);
-                volatility.Add(percentChange);
-            }
+            if (_data.Count < 2)
+                return new List<double>();
 
-            return volatility;
+            return _data.Skip(1)
+                       .Zip(_data, (current, previous) => 
+                           Math.Abs((current - previous) / previous))
+                       .ToList();
         }
 
-        public void ShowPriceDetails(Point location)
+        private void ShowPriceDetails(Point location)
         {
+            _currentTooltip?.Dispose();
+
             var chartArea = CalculateChartArea();
             if (!chartArea.Contains(location)) return;
 
             int index = GetDataIndexFromLocation(location, chartArea);
             if (index < 0 || index >= _data.Count) return;
 
-            var tooltip = new ToolTip();
+            _currentTooltip = new ToolTip { InitialDelay = 0, ReshowDelay = 0 };
             string details = $"Preço: {_data[index]:C2}\n";
             
             if (_showMMA && index >= _mmaperiod - 1)
@@ -201,29 +355,8 @@ namespace ListaCompras.UI.Controls
                 details += $"Volume: {_volumes[index]}";
             }
 
-            tooltip.Show(details, this, location.X + 10, location.Y - 10, 3000);
+            _currentTooltip.Show(details, this, location.X + 10, location.Y - 10, 3000);
         }
-
-        private int GetDataIndexFromLocation(Point location, Rectangle chartArea)
-        {
-            if (_data.Count == 0) return -1;
-
-            float xStep = chartArea.Width / (float)(_data.Count - 1);
-            float relativeX = location.X - chartArea.Left;
-            int index = (int)Math.Round(relativeX / xStep);
-
-            return Math.Max(0, Math.Min(_data.Count - 1, index));
-        }
-
-        protected override void OnMouseMove(MouseEventArgs e)
-        {
-            base.OnMouseMove(e);
-            
-            var chartArea = CalculateChartArea();
-            if (chartArea.Contains(e.Location))
-            {
-                ShowPriceDetails(e.Location);
-            }
-        }
+        #endregion
     }
 }

@@ -2,202 +2,298 @@ using System;
 using System.Drawing;
 using System.Windows.Forms;
 using System.Collections.Generic;
-using ListaCompras.UI.Forms;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace ListaCompras.UI
 {
     public class ResponsiveManager
     {
-        private static ResponsiveManager _instance;
-        public static ResponsiveManager Instance => _instance ??= new ResponsiveManager();
+        private static readonly Lazy<ResponsiveManager> _instance =
+            new Lazy<ResponsiveManager>(() => new ResponsiveManager());
+        
+        public static ResponsiveManager Instance => _instance.Value;
 
-        private readonly Dictionary<Control, ResponsiveInfo> _controlsInfo = new();
-        private readonly List<Form> _registeredForms = new();
-        private float _dpiScale = 1.0f;
-
-        public class ResponsiveInfo
-        {
-            public float OriginalFontSize { get; set; }
-            public Padding OriginalPadding { get; set; }
-            public Size OriginalSize { get; set; }
-            public Point OriginalLocation { get; set; }
-            public AnchorStyles OriginalAnchor { get; set; }
-            public bool UseRelativePositioning { get; set; }
-            public float RelativeX { get; set; }
-            public float RelativeY { get; set; }
-            public float RelativeWidth { get; set; }
-            public float RelativeHeight { get; set; }
-        }
+        private readonly Dictionary<Form, FormLayoutInfo> _formLayouts;
+        private readonly Timer _resizeTimer;
+        private float _currentDpiScale = 1.0f;
+        private Size _baseResolution = new Size(1920, 1080);
+        private const int MinWidth = 800;
+        private const int MinHeight = 600;
 
         private ResponsiveManager()
         {
-            // Detecta DPI inicial
-            using (var g = Graphics.FromHwnd(IntPtr.Zero))
+            _formLayouts = new Dictionary<Form, FormLayoutInfo>();
+            _resizeTimer = new Timer { Interval = 100 };
+            _resizeTimer.Tick += HandleDelayedResize;
+        }
+
+        private class FormLayoutInfo
+        {
+            public Size InitialSize { get; set; }
+            public Dictionary<Control, Rectangle> ControlLayouts { get; }
+            public Dictionary<Control, Rectangle> NewLayouts { get; }
+            public Dictionary<Control, float> InitialFontSizes { get; }
+            public bool IsResizing { get; set; }
+            public float MinScaleFactor { get; set; } = 0.7f;
+            public float MaxScaleFactor { get; set; } = 1.5f;
+
+            public FormLayoutInfo(Form form)
             {
-                _dpiScale = g.DpiX / 96f;
+                InitialSize = form.Size;
+                ControlLayouts = new Dictionary<Control, Rectangle>();
+                NewLayouts = new Dictionary<Control, Rectangle>();
+                InitialFontSizes = new Dictionary<Control, float>();
+            }
+
+            public void CaptureInitialLayout()
+            {
+                CaptureControlLayout(ControlLayouts.Keys);
+            }
+
+            private void CaptureControlLayout(IEnumerable<Control> controls)
+            {
+                foreach (Control control in controls)
+                {
+                    if (!ControlLayouts.ContainsKey(control))
+                    {
+                        ControlLayouts[control] = control.Bounds;
+                        if (control.Font != null)
+                            InitialFontSizes[control] = control.Font.Size;
+                    }
+                }
             }
         }
 
         public void RegisterForm(Form form)
         {
-            if (_registeredForms.Contains(form)) return;
+            if (_formLayouts.ContainsKey(form)) return;
 
-            _registeredForms.Add(form);
-            form.ResizeBegin += Form_ResizeBegin;
-            form.ResizeEnd += Form_ResizeEnd;
-            form.SizeChanged += Form_SizeChanged;
-            
-            // Registra controles recursivamente
-            RegisterControlsRecursively(form);
-            
-            // Configura handlers de DPI
-            form.HandleCreated += (s, e) =>
-            {
-                if (Environment.OSVersion.Version.Major >= 6)
-                {
-                    NativeMethods.SetProcessDPIAware();
-                }
-            };
+            var layoutInfo = new FormLayoutInfo(form);
+            _formLayouts[form] = layoutInfo;
+
+            form.ResizeBegin += (s, e) => BeginFormResize(form);
+            form.ResizeEnd += (s, e) => EndFormResize(form);
+            form.SizeChanged += (s, e) => HandleFormResize(form);
+            form.Load += (s, e) => InitializeFormLayout(form);
+            form.FormClosing += (s, e) => UnregisterForm(form);
+            form.DpiChanged += (s, e) => HandleDpiChange(form, e.DeviceDpiOld, e.DeviceDpiNew);
+
+            RegisterControlsRecursively(form, layoutInfo);
         }
 
-        private void RegisterControlsRecursively(Control parent)
+        private void RegisterControlsRecursively(Control parent, FormLayoutInfo layoutInfo)
         {
             foreach (Control control in parent.Controls)
             {
-                if (!_controlsInfo.ContainsKey(control))
+                layoutInfo.ControlLayouts[control] = control.Bounds;
+                if (control.Font != null)
+                    layoutInfo.InitialFontSizes[control] = control.Font.Size;
+
+                control.ControlAdded += (s, e) => RegisterControlsRecursively(e.Control, layoutInfo);
+                RegisterControlsRecursively(control, layoutInfo);
+            }
+        }
+
+        private void UnregisterForm(Form form)
+        {
+            if (_formLayouts.ContainsKey(form))
+                _formLayouts.Remove(form);
+        }
+
+        private void SetMinimumSize(Form form)
+        {
+            form.MinimumSize = new Size(MinWidth, MinHeight);
+        }
+
+        private void BeginFormResize(Form form)
+        {
+            if (!_formLayouts.TryGetValue(form, out var layoutInfo)) return;
+
+            layoutInfo.IsResizing = true;
+            form.SuspendLayout();
+        }
+
+        private void EndFormResize(Form form)
+        {
+            if (!_formLayouts.TryGetValue(form, out var layoutInfo)) return;
+
+            layoutInfo.IsResizing = false;
+            form.ResumeLayout(true);
+            
+            _resizeTimer.Stop();
+            HandleFormResize(form);
+        }
+
+        private void HandleFormResize(Form form)
+        {
+            if (!_formLayouts.TryGetValue(form, out var layoutInfo) || layoutInfo.IsResizing)
+                return;
+
+            _resizeTimer.Stop();
+            _resizeTimer.Start();
+        }
+
+        private async void HandleDelayedResize(object sender, EventArgs e)
+        {
+            _resizeTimer.Stop();
+
+            foreach (var form in new List<Form>(_formLayouts.Keys))
+            {
+                if (!form.IsDisposed && form.Visible)
                 {
-                    var info = new ResponsiveInfo
+                    await Task.Run(() => CalculateNewLayout(form));
+                    if (!form.IsDisposed)
+                        form.BeginInvoke(new Action(() => ApplyNewLayout(form)));
+                }
+            }
+        }
+
+        private void CalculateNewLayout(Form form)
+        {
+            if (!_formLayouts.TryGetValue(form, out var layoutInfo)) return;
+
+            var scaleX = (float)form.Width / layoutInfo.InitialSize.Width;
+            var scaleY = (float)form.Height / layoutInfo.InitialSize.Height;
+            var scale = Math.Min(scaleX, scaleY);
+
+            // Limita o fator de escala
+            scale = Math.Max(layoutInfo.MinScaleFactor, 
+                   Math.Min(layoutInfo.MaxScaleFactor, scale));
+
+            foreach (var control in layoutInfo.ControlLayouts)
+            {
+                var initial = control.Value;
+                
+                // Calcula nova posição mantendo proporcionalidade
+                var newX = (int)(initial.X * scaleX);
+                var newY = (int)(initial.Y * scaleY);
+                var newWidth = (int)(initial.Width * scale);
+                var newHeight = (int)(initial.Height * scale);
+
+                // Ajusta para DPI
+                newWidth = (int)(newWidth * _currentDpiScale);
+                newHeight = (int)(newHeight * _currentDpiScale);
+
+                var newBounds = new Rectangle(newX, newY, newWidth, newHeight);
+                layoutInfo.NewLayouts[control.Key] = newBounds;
+            }
+        }
+
+        private void ApplyNewLayout(Form form)
+        {
+            if (!_formLayouts.TryGetValue(form, out var layoutInfo)) return;
+
+            form.SuspendLayout();
+
+            try
+            {
+                foreach (var control in layoutInfo.NewLayouts)
+                {
+                    if (!control.Key.IsDisposed)
                     {
-                        OriginalFontSize = control.Font.Size,
-                        OriginalPadding = control.Padding,
-                        OriginalSize = control.Size,
-                        OriginalLocation = control.Location,
-                        OriginalAnchor = control.Anchor,
-                        UseRelativePositioning = ShouldUseRelativePositioning(control),
-                    };
-
-                    if (info.UseRelativePositioning)
-                    {
-                        info.RelativeX = control.Left / (float)parent.ClientSize.Width;
-                        info.RelativeY = control.Top / (float)parent.ClientSize.Height;
-                        info.RelativeWidth = control.Width / (float)parent.ClientSize.Width;
-                        info.RelativeHeight = control.Height / (float)parent.ClientSize.Height;
-                    }
-
-                    _controlsInfo[control] = info;
-                }
-
-                RegisterControlsRecursively(control);
-            }
-        }
-
-        private bool ShouldUseRelativePositioning(Control control)
-        {
-            // Determina quais controles devem usar posicionamento relativo
-            return control is Panel || 
-                   control is GroupBox || 
-                   control is TableLayoutPanel ||
-                   control is FlowLayoutPanel ||
-                   control.Dock == DockStyle.None;
-        }
-
-        private void Form_ResizeBegin(object sender, EventArgs e)
-        {
-            if (sender is Form form)
-            {
-                form.SuspendLayout();
-            }
-        }
-
-        private void Form_ResizeEnd(object sender, EventArgs e)
-        {
-            if (sender is Form form)
-            {
-                form.ResumeLayout();
-                form.PerformLayout();
-            }
-        }
-
-        private void Form_SizeChanged(object sender, EventArgs e)
-        {
-            if (sender is not Form form) return;
-
-            foreach (Control control in form.Controls)
-            {
-                AdjustControlRecursively(control);
-            }
-        }
-
-        private void AdjustControlRecursively(Control control)
-        {
-            if (_controlsInfo.TryGetValue(control, out var info))
-            {
-                if (info.UseRelativePositioning && control.Parent != null)
-                {
-                    // Ajusta posição e tamanho relativos
-                    int newX = (int)(info.RelativeX * control.Parent.ClientSize.Width);
-                    int newY = (int)(info.RelativeY * control.Parent.ClientSize.Height);
-                    int newWidth = (int)(info.RelativeWidth * control.Parent.ClientSize.Width);
-                    int newHeight = (int)(info.RelativeHeight * control.Parent.ClientSize.Height);
-
-                    if (control.Location != new Point(newX, newY))
-                        control.Location = new Point(newX, newY);
-
-                    if (control.Size != new Size(newWidth, newHeight))
-                        control.Size = new Size(newWidth, newHeight);
-                }
-
-                // Ajusta fonte com base no DPI
-                float scaledFontSize = info.OriginalFontSize * _dpiScale;
-                if (Math.Abs(control.Font.Size - scaledFontSize) > 0.1f)
-                {
-                    control.Font = new Font(control.Font.FontFamily, scaledFontSize);
-                }
-
-                // Ajusta padding
-                var scaledPadding = new Padding(
-                    (int)(info.OriginalPadding.Left * _dpiScale),
-                    (int)(info.OriginalPadding.Top * _dpiScale),
-                    (int)(info.OriginalPadding.Right * _dpiScale),
-                    (int)(info.OriginalPadding.Bottom * _dpiScale)
-                );
-
-                if (control.Padding != scaledPadding)
-                {
-                    control.Padding = scaledPadding;
-                }
-            }
-
-            // Processa controles filhos
-            foreach (Control child in control.Controls)
-            {
-                AdjustControlRecursively(child);
-            }
-        }
-
-        public void UpdateDPIScale()
-        {
-            using (var g = Graphics.FromHwnd(IntPtr.Zero))
-            {
-                var newDpiScale = g.DpiX / 96f;
-                if (Math.Abs(_dpiScale - newDpiScale) > 0.01f)
-                {
-                    _dpiScale = newDpiScale;
-                    foreach (var form in _registeredForms)
-                    {
-                        foreach (Control control in form.Controls)
-                        {
-                            AdjustControlRecursively(control);
-                        }
+                        control.Key.Bounds = control.Value;
+                        AdjustFontSize(control.Key, layoutInfo);
+                        AdjustControlSpecifics(control.Key);
                     }
                 }
             }
+            finally
+            {
+                form.ResumeLayout(true);
+            }
         }
-    }
 
-    internal static class NativeMethods
-    {
-        [System.Runtime.InteropServices.DllImport("user32.dll")]
-        internal static extern bool SetProcessDPIAware();
+        private void AdjustFontSize(Control control, FormLayoutInfo layoutInfo)
+        {
+            if (!layoutInfo.InitialFontSizes.TryGetValue(control, out float initialSize))
+                return;
+
+            var scale = Math.Min(
+                (float)control.Width / layoutInfo.ControlLayouts[control].Width,
+                (float)control.Height / layoutInfo.ControlLayouts[control].Height);
+
+            scale = Math.Max(layoutInfo.MinScaleFactor,
+                   Math.Min(layoutInfo.MaxScaleFactor, scale));
+
+            float newSize = initialSize * scale * _currentDpiScale;
+            
+            if (control.Font.Size != newSize)
+            {
+                control.Font = new Font(control.Font.FontFamily, newSize, control.Font.Style);
+            }
+        }
+
+        private void AdjustControlSpecifics(Control control)
+        {
+            if (control is DataGridView grid)
+            {
+                foreach (DataGridViewColumn column in grid.Columns)
+                {
+                    column.Width = (int)(column.Width * _currentDpiScale);
+                }
+            }
+            else if (control is ListView listView)
+            {
+                foreach (ColumnHeader column in listView.Columns)
+                {
+                    column.Width = (int)(column.Width * _currentDpiScale);
+                }
+            }
+            // Adicione outros controles específicos aqui
+        }
+
+        private void HandleDpiChange(Form form, int oldDpi, int newDpi)
+        {
+            float scaleFactor = newDpi / (float)oldDpi;
+            _currentDpiScale = newDpi / 96f;
+
+            if (!_formLayouts.TryGetValue(form, out var layoutInfo)) return;
+
+            form.SuspendLayout();
+            try
+            {
+                foreach (var control in layoutInfo.ControlLayouts.Keys)
+                {
+                    if (!control.IsDisposed)
+                    {
+                        var bounds = layoutInfo.ControlLayouts[control];
+                        var newBounds = new Rectangle(
+                            (int)(bounds.X * scaleFactor),
+                            (int)(bounds.Y * scaleFactor),
+                            (int)(bounds.Width * scaleFactor),
+                            (int)(bounds.Height * scaleFactor));
+
+                        control.Bounds = newBounds;
+                        AdjustFontSize(control, layoutInfo);
+                        AdjustControlSpecifics(control);
+                    }
+                }
+            }
+            finally
+            {
+                form.ResumeLayout(true);
+            }
+        }
+
+        public void SetBaseResolution(Size resolution)
+        {
+            _baseResolution = resolution;
+            foreach (var form in _formLayouts.Keys)
+            {
+                if (!form.IsDisposed)
+                    HandleFormResize(form);
+            }
+        }
+
+        public void SetScaleLimits(Form form, float minScale, float maxScale)
+        {
+            if (_formLayouts.TryGetValue(form, out var layoutInfo))
+            {
+                layoutInfo.MinScaleFactor = minScale;
+                layoutInfo.MaxScaleFactor = maxScale;
+                HandleFormResize(form);
+            }
+        }
     }
 }

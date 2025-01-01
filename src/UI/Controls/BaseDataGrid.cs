@@ -2,24 +2,109 @@ using System;
 using System.Drawing;
 using System.Windows.Forms;
 using System.ComponentModel;
+using System.Collections.Generic;
+using System.Threading.Tasks;
+using System.Linq;
+using System.Threading;
 using ListaCompras.UI.Themes;
 
 namespace ListaCompras.UI.Controls
 {
     public class BaseDataGrid : DataGridView
     {
+        #region Fields
         private bool _isLoading;
         private string _loadingText = "Carregando...";
         private string _emptyText = "Nenhum dado encontrado";
         private readonly Timer _sortTimer;
+        private readonly object _lockObject = new object();
+        private int _virtualItemCount;
+        private int _pageSize = 100;
+        private int _currentPage;
+        private bool _isVirtualMode;
+        private readonly Dictionary<int, object> _cachedRows;
+        private readonly Queue<int> _cacheQueue;
+        private const int MaxCacheSize = 1000;
+        private CancellationTokenSource _loadingCts;
+        private bool _isPaging;
+        private IList<object> _sourceData;
+        #endregion
 
+        #region Events
+        public event EventHandler<int> PageChanged;
+        public event EventHandler<DataGridViewCellEventArgs> VirtualCellValueNeeded;
+        public event EventHandler<int> LoadPageRequested;
+        #endregion
+
+        #region Constructor
         public BaseDataGrid()
         {
             InitializeGrid();
             InitializeSort();
             SubscribeToTheme();
+
+            _cachedRows = new Dictionary<int, object>();
+            _cacheQueue = new Queue<int>();
+            _sortTimer = new Timer { Interval = 300 };
+            _sortTimer.Tick += HandleDelayedSort;
+        }
+        #endregion
+
+        #region Properties
+        public bool IsLoading
+        {
+            get => _isLoading;
+            set
+            {
+                if (_isLoading != value)
+                {
+                    _isLoading = value;
+                    if (value)
+                    {
+                        _loadingCts?.Cancel();
+                        _loadingCts = new CancellationTokenSource();
+                    }
+                    Invalidate();
+                }
+            }
         }
 
+        public bool IsPaging
+        {
+            get => _isPaging;
+            set
+            {
+                if (_isPaging != value)
+                {
+                    _isPaging = value;
+                    if (value)
+                    {
+                        ScrollBars = ScrollBars.Both;
+                        _currentPage = 0;
+                    }
+                    RefreshData();
+                }
+            }
+        }
+
+        public int PageSize
+        {
+            get => _pageSize;
+            set
+            {
+                if (value > 0 && _pageSize != value)
+                {
+                    _pageSize = value;
+                    if (_isPaging)
+                    {
+                        RefreshData();
+                    }
+                }
+            }
+        }
+        #endregion
+
+        #region Private Methods
         private void InitializeGrid()
         {
             AutoGenerateColumns = false;
@@ -38,98 +123,207 @@ namespace ListaCompras.UI.Controls
 
             Font = ThemeManager.Instance.GetFont();
             
-            // Double buffering via reflection
-            var dgvType = this.GetType();
-            var pi = dgvType.GetProperty("DoubleBuffered", 
-                System.Reflection.BindingFlags.Instance | 
-                System.Reflection.BindingFlags.NonPublic);
-            pi.SetValue(this, true, null);
+            SetStyle(ControlStyles.OptimizedDoubleBuffer | 
+                    ControlStyles.AllPaintingInWmPaint | 
+                    ControlStyles.UserPaint, true);
+                    
+            DoubleBuffered = true;
         }
 
-        private void InitializeSort()
+        private void HandleDelayedSort(object sender, EventArgs e)
         {
-            _sortTimer = new Timer { Interval = 300 };
-            _sortTimer.Tick += (s, e) => 
+            _sortTimer.Stop();
+            if (SortedColumn != null)
             {
-                _sortTimer.Stop();
-                Sort(SortedColumn, SortOrder);
-            };
+                BeginInvoke(new Action(() => 
+                {
+                    Sort(SortedColumn, SortOrder);
+                }));
+            }
         }
 
-        private void SubscribeToTheme()
+        protected override void OnScroll(ScrollEventArgs e)
         {
-            ThemeManager.Instance.ThemeChanged += (s, e) => ApplyTheme();
-            ApplyTheme();
+            base.OnScroll(e);
+
+            if (_isPaging && e.ScrollOrientation == ScrollOrientation.VerticalScroll)
+            {
+                if (NearBottom() && _currentPage * _pageSize < _virtualItemCount)
+                {
+                    LoadNextPage();
+                }
+            }
         }
 
-        private void ApplyTheme()
+        private bool NearBottom()
         {
-            var theme = ThemeManager.Instance.CurrentTheme;
-            
-            BackgroundColor = theme.Background;
-            GridColor = theme.Border;
-            DefaultCellStyle.BackColor = theme.Surface;
-            DefaultCellStyle.ForeColor = theme.TextPrimary;
-            DefaultCellStyle.SelectionBackColor = theme.Primary;
-            DefaultCellStyle.SelectionForeColor = Color.White;
-            
-            ColumnHeadersDefaultCellStyle.BackColor = theme.BackgroundAlt;
-            ColumnHeadersDefaultCellStyle.ForeColor = theme.TextPrimary;
-            ColumnHeadersDefaultCellStyle.SelectionBackColor = theme.BackgroundAlt;
-            ColumnHeadersDefaultCellStyle.SelectionForeColor = theme.TextPrimary;
-            
-            AlternatingRowsDefaultCellStyle.BackColor = theme.BackgroundAlt;
-            AlternatingRowsDefaultCellStyle.ForeColor = theme.TextPrimary;
-            AlternatingRowsDefaultCellStyle.SelectionBackColor = theme.Primary;
-            AlternatingRowsDefaultCellStyle.SelectionForeColor = Color.White;
+            int displayedRows = DisplayedRowCount(false);
+            int firstDisplayed = FirstDisplayedScrollingRowIndex;
+            return (firstDisplayed + displayedRows) >= RowCount - 5;
+        }
+
+        private async void LoadNextPage()
+        {
+            if (IsLoading) return;
+
+            IsLoading = true;
+            _currentPage++;
+
+            try
+            {
+                LoadPageRequested?.Invoke(this, _currentPage);
+                await LoadPageDataAsync(_currentPage, _loadingCts.Token);
+                PageChanged?.Invoke(this, _currentPage);
+            }
+            catch (OperationCanceledException)
+            {
+                // Carregamento cancelado
+            }
+            finally
+            {
+                IsLoading = false;
+            }
+        }
+
+        private async Task LoadPageDataAsync(int page, CancellationToken ct)
+        {
+            if (_sourceData == null) return;
+
+            int startIndex = page * _pageSize;
+            int endIndex = Math.Min(startIndex + _pageSize, _sourceData.Count);
+
+            var pageData = _sourceData.Skip(startIndex).Take(_pageSize).ToList();
+
+            await Task.Run(() =>
+            {
+                for (int i = 0; i < pageData.Count && !ct.IsCancellationRequested; i++)
+                {
+                    AddToCache(startIndex + i, pageData[i]);
+                }
+            }, ct);
+
+            if (!ct.IsCancellationRequested)
+            {
+                BeginInvoke(new Action(() => RefreshDisplay()));
+            }
+        }
+
+        private void AddToCache(int index, object data)
+        {
+            lock (_lockObject)
+            {
+                if (_cachedRows.Count >= MaxCacheSize)
+                {
+                    int oldestIndex = _cacheQueue.Dequeue();
+                    _cachedRows.Remove(oldestIndex);
+                }
+
+                _cachedRows[index] = data;
+                _cacheQueue.Enqueue(index);
+            }
+        }
+
+        private void ClearCache()
+        {
+            lock (_lockObject)
+            {
+                _cachedRows.Clear();
+                _cacheQueue.Clear();
+            }
+        }
+
+        protected override void OnCellValueNeeded(DataGridViewCellValueEventArgs e)
+        {
+            if (_isVirtualMode)
+            {
+                object value = null;
+                lock (_lockObject)
+                {
+                    if (_cachedRows.TryGetValue(e.RowIndex, out object rowData))
+                    {
+                        var property = rowData.GetType().GetProperty(Columns[e.ColumnIndex].DataPropertyName);
+                        if (property != null)
+                        {
+                            value = property.GetValue(rowData);
+                        }
+                    }
+                }
+
+                e.Value = value;
+                VirtualCellValueNeeded?.Invoke(this, new DataGridViewCellEventArgs(e.ColumnIndex, e.RowIndex));
+            }
+            else
+            {
+                base.OnCellValueNeeded(e);
+            }
+        }
+
+        public async Task LoadDataAsync<T>(IList<T> data, bool useVirtualization = true)
+        {
+            if (data == null) return;
+
+            IsLoading = true;
+            ClearCache();
+
+            try
+            {
+                _sourceData = data.Cast<object>().ToList();
+                _virtualItemCount = data.Count;
+
+                if (useVirtualization && data.Count > 1000)
+                {
+                    _isVirtualMode = true;
+                    VirtualMode = true;
+                    RowCount = _virtualItemCount;
+                    await LoadPageDataAsync(0, _loadingCts.Token);
+                }
+                else
+                {
+                    _isVirtualMode = false;
+                    VirtualMode = false;
+                    DataSource = new BindingList<T>(data.ToList());
+                }
+            }
+            finally
+            {
+                IsLoading = false;
+            }
+        }
+
+        private void RefreshDisplay()
+        {
+            if (InvokeRequired)
+            {
+                BeginInvoke(new Action(RefreshDisplay));
+                return;
+            }
 
             Invalidate();
+            Update();
         }
 
-        public bool IsLoading
+        public void AddColumn(string name, string headerText, string dataPropertyName, 
+            int width = 100, DataGridViewContentAlignment alignment = DataGridViewContentAlignment.MiddleLeft,
+            bool sortable = true)
         {
-            get => _isLoading;
-            set
+            var column = new DataGridViewTextBoxColumn
             {
-                if (_isLoading != value)
-                {
-                    _isLoading = value;
-                    Invalidate();
-                }
-            }
-        }
+                Name = name,
+                HeaderText = headerText,
+                DataPropertyName = dataPropertyName,
+                Width = width,
+                DefaultCellStyle = { Alignment = alignment },
+                SortMode = sortable ? DataGridViewColumnSortMode.Automatic : DataGridViewColumnSortMode.NotSortable
+            };
 
-        public string LoadingText
-        {
-            get => _loadingText;
-            set
-            {
-                if (_loadingText != value)
-                {
-                    _loadingText = value;
-                    if (_isLoading) Invalidate();
-                }
-            }
-        }
-
-        public string EmptyText
-        {
-            get => _emptyText;
-            set
-            {
-                if (_emptyText != value)
-                {
-                    _emptyText = value;
-                    if (RowCount == 0) Invalidate();
-                }
-            }
+            Columns.Add(column);
         }
 
         protected override void OnPaint(PaintEventArgs e)
         {
             base.OnPaint(e);
 
-            if (RowCount == 0)
+            if (RowCount == 0 || _isLoading)
             {
                 var theme = ThemeManager.Instance.CurrentTheme;
                 using (var brush = new SolidBrush(theme.TextSecondary))
@@ -146,65 +340,35 @@ namespace ListaCompras.UI.Controls
 
         protected override void OnColumnHeaderMouseClick(DataGridViewCellMouseEventArgs e)
         {
-            base.OnColumnHeaderMouseClick(e);
-            
-            if (RowCount > 0)
+            if (!_sortTimer.Enabled && RowCount > 0)
             {
-                // Adia a ordenação para evitar múltiplos sorts
-                _sortTimer.Stop();
                 _sortTimer.Start();
             }
         }
 
-        public void AddColumn(string name, string headerText, string dataPropertyName, 
-            int width = 100, DataGridViewContentAlignment alignment = DataGridViewContentAlignment.MiddleLeft)
+        protected override void Sort(DataGridViewColumn dataGridViewColumn, ListSortDirection direction)
         {
-            var column = new DataGridViewTextBoxColumn
+            if (_isVirtualMode)
             {
-                Name = name,
-                HeaderText = headerText,
-                DataPropertyName = dataPropertyName,
-                Width = width,
-                DefaultCellStyle = { Alignment = alignment },
-                SortMode = DataGridViewColumnSortMode.Automatic
-            };
+                // Para modo virtual, ordena os dados fonte e recarrega
+                var prop = dataGridViewColumn.DataPropertyName;
+                var sorted = direction == ListSortDirection.Ascending ?
+                    _sourceData.OrderBy(r => GetPropertyValue(r, prop)) :
+                    _sourceData.OrderByDescending(r => GetPropertyValue(r, prop));
 
-            Columns.Add(column);
+                _sourceData = sorted.ToList();
+                ClearCache();
+                LoadPageDataAsync(0, _loadingCts.Token).ConfigureAwait(false);
+            }
+            else
+            {
+                base.Sort(dataGridViewColumn, direction);
+            }
         }
 
-        public void AddButtonColumn(string name, string headerText, string text, 
-            int width = 80, DataGridViewContentAlignment alignment = DataGridViewContentAlignment.MiddleCenter)
+        private object GetPropertyValue(object obj, string propertyName)
         {
-            var column = new DataGridViewButtonColumn
-            {
-                Name = name,
-                HeaderText = headerText,
-                Text = text,
-                Width = width,
-                DefaultCellStyle = { Alignment = alignment },
-                SortMode = DataGridViewColumnSortMode.NotSortable,
-                UseColumnTextForButtonValue = true
-            };
-
-            Columns.Add(column);
-        }
-
-        public void LoadData<T>(BindingList<T> data)
-        {
-            IsLoading = true;
-            DataSource = null;
-
-            try
-            {
-                if (data != null)
-                {
-                    DataSource = data;
-                }
-            }
-            finally
-            {
-                IsLoading = false;
-            }
+            return obj.GetType().GetProperty(propertyName)?.GetValue(obj);
         }
 
         protected override void Dispose(bool disposing)
@@ -212,8 +376,10 @@ namespace ListaCompras.UI.Controls
             if (disposing)
             {
                 _sortTimer?.Dispose();
+                _loadingCts?.Dispose();
             }
             base.Dispose(disposing);
         }
+        #endregion
     }
 }

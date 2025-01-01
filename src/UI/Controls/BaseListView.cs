@@ -2,234 +2,330 @@ using System;
 using System.Drawing;
 using System.Windows.Forms;
 using System.ComponentModel;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading.Tasks;
 using ListaCompras.UI.Themes;
 
 namespace ListaCompras.UI.Controls
 {
     public class BaseListView : ListView
     {
+        #region Fields
         private bool _isLoading;
         private string _loadingText = "Carregando...";
         private readonly Timer _sortTimer;
         private readonly ToolTip _tooltip;
+        private readonly Dictionary<int, ListViewItem> _virtualItems;
+        private readonly Queue<int> _virtualItemsQueue;
+        private const int CacheSize = 1000;
+        private bool _isVirtualMode;
+        private int _totalItems;
+        private int _pageSize = 100;
+        private readonly object _lockObject = new object();
+        private readonly Timer _scrollTimer;
+        private float _dpiScale = 1.0f;
+        #endregion
 
         public BaseListView()
         {
             InitializeListView();
-            InitializeSort();
+            InitializeTimers();
             InitializeTooltip();
             SubscribeToTheme();
+            InitializeVirtualization();
+            HandleDpiChanged();
         }
 
+        #region Initialization
         private void InitializeListView()
         {
             SetStyle(ControlStyles.OptimizedDoubleBuffer | 
-                    ControlStyles.AllPaintingInWmPaint, true);
+                    ControlStyles.AllPaintingInWmPaint |
+                    ControlStyles.ResizeRedraw |
+                    ControlStyles.UserPaint, true);
             
             FullRowSelect = true;
             GridLines = true;
             View = View.Details;
             
             Font = ThemeManager.Instance.GetFont();
-            
             BorderStyle = BorderStyle.None;
             DoubleBuffered = true;
+
+            ResizeRedraw = true;
+            AutoResizeColumns(ColumnHeaderAutoResizeStyle.HeaderSize);
         }
 
-        private void InitializeSort()
+        private void InitializeTimers()
         {
             _sortTimer = new Timer { Interval = 300 };
             _sortTimer.Tick += (s, e) => 
             {
                 _sortTimer.Stop();
-                Sort();
+                BeginInvoke(new Action(() => SortItems()));
+            };
+
+            _scrollTimer = new Timer { Interval = 150 };
+            _scrollTimer.Tick += (s, e) =>
+            {
+                _scrollTimer.Stop();
+                if (_isVirtualMode)
+                    LoadVisibleItems();
             };
         }
 
-        private void InitializeTooltip()
+        private void InitializeVirtualization()
         {
-            _tooltip = new ToolTip
-            {
-                ShowAlways = true,
-                InitialDelay = 500,
-                ReshowDelay = 100
-            };
+            _virtualItems = new Dictionary<int, ListViewItem>();
+            _virtualItemsQueue = new Queue<int>();
+            VirtualMode = true;
+            VirtualListSize = 0;
+            RetrieveVirtualItem += OnRetrieveVirtualItem;
+            CacheVirtualItems += OnCacheVirtualItems;
         }
 
-        private void SubscribeToTheme()
+        private void HandleDpiChanged()
         {
-            ThemeManager.Instance.ThemeChanged += (s, e) => ApplyTheme();
-            ApplyTheme();
+            _dpiScale = CreateGraphics().DpiX / 96f;
+            AdjustControlsForDpi();
         }
+        #endregion
 
-        private void ApplyTheme()
+        #region DPI Handling
+        private void AdjustControlsForDpi()
         {
-            var theme = ThemeManager.Instance.CurrentTheme;
-            BackColor = theme.Surface;
-            ForeColor = theme.TextPrimary;
-
-            if (Items.Count == 0 && _isLoading)
-            {
-                Invalidate();
-            }
-        }
-
-        protected override void OnColumnClick(ColumnClickEventArgs e)
-        {
-            base.OnColumnClick(e);
+            Font = new Font(Font.FontFamily, Font.Size * _dpiScale);
             
-            if (Items.Count > 0)
+            foreach (ColumnHeader column in Columns)
             {
-                // Adia a ordenação para evitar múltiplos sorts
-                _sortTimer.Stop();
-                _sortTimer.Start();
+                column.Width = (int)(column.Width * _dpiScale);
+            }
+
+            ItemHeight = (int)(ItemHeight * _dpiScale);
+            Invalidate();
+        }
+
+        protected override void OnDpiChangedAfterParent(EventArgs e)
+        {
+            base.OnDpiChangedAfterParent(e);
+            HandleDpiChanged();
+        }
+        #endregion
+
+        #region Virtualization
+        private void OnRetrieveVirtualItem(object sender, RetrieveVirtualItemEventArgs e)
+        {
+            if (_virtualItems.TryGetValue(e.ItemIndex, out ListViewItem item))
+            {
+                e.Item = item;
+                return;
+            }
+
+            e.Item = new ListViewItem($"Loading item {e.ItemIndex}...");
+            LoadItem(e.ItemIndex);
+        }
+
+        private void OnCacheVirtualItems(object sender, CacheVirtualItemsEventArgs e)
+        {
+            LoadItems(e.StartIndex, e.EndIndex);
+        }
+
+        private async void LoadItem(int index)
+        {
+            if (!_virtualItems.ContainsKey(index))
+            {
+                var item = await Task.Run(() => CreateListViewItem(index));
+                AddToCache(index, item);
+                RefreshItem(index);
             }
         }
 
-        protected override void OnMouseMove(MouseEventArgs e)
+        private async void LoadItems(int startIndex, int endIndex)
         {
-            base.OnMouseMove(e);
-
-            var item = GetItemAt(e.X, e.Y);
-            if (item != null)
+            var tasks = new List<Task>();
+            
+            for (int i = startIndex; i <= endIndex; i++)
             {
-                var tip = item.ToolTipText;
-                if (!string.IsNullOrEmpty(tip) && _tooltip.GetToolTip(this) != tip)
+                if (!_virtualItems.ContainsKey(i))
                 {
-                    _tooltip.SetToolTip(this, tip);
+                    tasks.Add(Task.Run(() => 
+                    {
+                        var item = CreateListViewItem(i);
+                        AddToCache(i, item);
+                    }));
                 }
             }
-            else
-            {
-                _tooltip.SetToolTip(this, string.Empty);
-            }
+
+            await Task.WhenAll(tasks);
+            RefreshItems(startIndex, endIndex);
         }
 
-        public bool IsLoading
+        private void LoadVisibleItems()
         {
-            get => _isLoading;
-            set
+            if (VirtualListSize == 0) return;
+
+            int firstVisible = TopItem?.Index ?? 0;
+            int visibleCount = LabelWrap ? ClientSize.Height / ItemHeight : ClientSize.Height / ItemHeight;
+            int lastVisible = Math.Min(firstVisible + visibleCount, VirtualListSize - 1);
+
+            LoadItems(firstVisible, lastVisible);
+        }
+
+        private ListViewItem CreateListViewItem(int index)
+        {
+            // Override this method in derived classes to create actual items
+            return new ListViewItem($"Item {index}");
+        }
+
+        private void AddToCache(int index, ListViewItem item)
+        {
+            lock (_lockObject)
             {
-                if (_isLoading != value)
+                if (_virtualItems.Count >= CacheSize)
                 {
-                    _isLoading = value;
-                    Invalidate();
+                    int oldestIndex = _virtualItemsQueue.Dequeue();
+                    _virtualItems.Remove(oldestIndex);
                 }
+
+                _virtualItems[index] = item;
+                _virtualItemsQueue.Enqueue(index);
             }
         }
 
-        public string LoadingText
+        private void ClearCache()
         {
-            get => _loadingText;
-            set
+            lock (_lockObject)
             {
-                if (_loadingText != value)
-                {
-                    _loadingText = value;
-                    if (_isLoading) Invalidate();
-                }
+                _virtualItems.Clear();
+                _virtualItemsQueue.Clear();
             }
         }
+        #endregion
 
-        protected override void OnPaint(PaintEventArgs e)
+        #region Scroll Handling
+        protected override void OnScroll(ScrollEventArgs e)
         {
-            base.OnPaint(e);
-
-            if (Items.Count == 0)
+            base.OnScroll(e);
+            
+            if (_isVirtualMode)
             {
-                var theme = ThemeManager.Instance.CurrentTheme;
-                using (var brush = new SolidBrush(theme.TextSecondary))
-                {
-                    var text = _isLoading ? _loadingText : "Nenhum item encontrado";
-                    var size = e.Graphics.MeasureString(text, Font);
-                    var point = new PointF(
-                        (Width - size.Width) / 2,
-                        (Height - size.Height) / 2);
-                    e.Graphics.DrawString(text, Font, brush, point);
-                }
+                _scrollTimer.Stop();
+                _scrollTimer.Start();
             }
         }
 
-        public void AddColumn(string text, int width, bool sortable = true)
+        protected override void OnMouseWheel(MouseEventArgs e)
         {
+            base.OnMouseWheel(e);
+            
+            if (_isVirtualMode)
+            {
+                _scrollTimer.Stop();
+                _scrollTimer.Start();
+            }
+        }
+        #endregion
+
+        #region Public Methods
+        public void SetVirtualDataSource<T>(IList<T> data)
+        {
+            _isVirtualMode = true;
+            _totalItems = data.Count;
+            VirtualListSize = _totalItems;
+            ClearCache();
+            Refresh();
+        }
+
+        public void AddColumn(string text, int width, ContentAlignment alignment = ContentAlignment.MiddleLeft)
+        {
+            width = (int)(width * _dpiScale);
             var column = Columns.Add(text, width);
-            column.Tag = sortable;
+            column.TextAlign = alignment;
         }
 
-        public new void Sort()
+        private void RefreshItem(int index)
         {
-            if (Items.Count == 0 || VirtualMode) return;
+            if (InvokeRequired)
+            {
+                BeginInvoke(new Action(() => RefreshItem(index)));
+                return;
+            }
 
-            var column = Columns[sortColumn];
-            if (column?.Tag is bool sortable && !sortable) return;
-
-            ListViewItemSorter = new ListViewItemComparer(sortColumn, sortOrder);
-            base.Sort();
+            RedrawItems(index, index, true);
         }
 
-        private int sortColumn = 0;
-        private SortOrder sortOrder = SortOrder.None;
-
-        public void SetSortColumn(int column, SortOrder order)
+        private void RefreshItems(int startIndex, int endIndex)
         {
-            sortColumn = column;
-            sortOrder = order;
-            Sort();
+            if (InvokeRequired)
+            {
+                BeginInvoke(new Action(() => RefreshItems(startIndex, endIndex)));
+                return;
+            }
+
+            RedrawItems(startIndex, endIndex, true);
         }
 
+        protected override void OnResize(EventArgs e)
+        {
+            base.OnResize(e);
+            
+            if (_isVirtualMode)
+                LoadVisibleItems();
+
+            AutoResizeColumns(ColumnHeaderAutoResizeStyle.HeaderSize);
+        }
+
+        public async Task LoadDataAsync<T>(IList<T> data)
+        {
+            IsLoading = true;
+
+            try
+            {
+                if (data.Count > 1000)
+                {
+                    SetVirtualDataSource(data);
+                }
+                else
+                {
+                    _isVirtualMode = false;
+                    VirtualMode = false;
+                    Items.Clear();
+                    
+                    await Task.Run(() => 
+                    {
+                        var items = data.Select(item => CreateListViewItemFromData(item)).ToList();
+                        BeginInvoke(new Action(() => 
+                        {
+                            Items.AddRange(items.ToArray());
+                        }));
+                    });
+                }
+            }
+            finally
+            {
+                IsLoading = false;
+            }
+        }
+
+        protected virtual ListViewItem CreateListViewItemFromData<T>(T data)
+        {
+            // Override this method to create items from data
+            return new ListViewItem(data.ToString());
+        }
+        #endregion
+
+        #region Disposal
         protected override void Dispose(bool disposing)
         {
             if (disposing)
             {
                 _sortTimer?.Dispose();
+                _scrollTimer?.Dispose();
                 _tooltip?.Dispose();
             }
             base.Dispose(disposing);
         }
-
-        private class ListViewItemComparer : System.Collections.IComparer
-        {
-            private readonly int _column;
-            private readonly SortOrder _order;
-
-            public ListViewItemComparer(int column, SortOrder order)
-            {
-                _column = column;
-                _order = order;
-            }
-
-            public int Compare(object x, object y)
-            {
-                if (_order == SortOrder.None) return 0;
-
-                var itemX = (ListViewItem)x;
-                var itemY = (ListViewItem)y;
-                
-                var textX = itemX.SubItems[_column].Text;
-                var textY = itemY.SubItems[_column].Text;
-
-                int result;
-
-                // Tenta comparar como número
-                if (decimal.TryParse(textX.Replace("R$", "").Trim(), out decimal numX) &&
-                    decimal.TryParse(textY.Replace("R$", "").Trim(), out decimal numY))
-                {
-                    result = numX.CompareTo(numY);
-                }
-                // Tenta comparar como data
-                else if (DateTime.TryParse(textX, out DateTime dateX) &&
-                         DateTime.TryParse(textY, out DateTime dateY))
-                {
-                    result = dateX.CompareTo(dateY);
-                }
-                // Compara como texto
-                else
-                {
-                    result = string.Compare(textX, textY, StringComparison.CurrentCulture);
-                }
-
-                return _order == SortOrder.Ascending ? result : -result;
-            }
-        }
+        #endregion
     }
 }
