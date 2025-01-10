@@ -1,0 +1,39 @@
+using System;
+using System.Collections.Generic;
+using System.Threading.Tasks;
+using ListaCompras.Core.Models;
+
+namespace ListaCompras.Core.Services
+{
+    public interface IListaService
+    {
+        Task<List<ListaModel>> GetAllAsync();
+        Task<ListaModel> GetByIdAsync(int id);
+        Task<ListaModel> SaveAsync(ListaModel lista);
+        Task DeleteAsync(int id);
+    }
+
+    public interface IItemService
+    {
+        Task<List<ItemModel>> GetAllAsync();
+        Task<ItemModel> GetByIdAsync(int id);
+        Task<ItemModel> SaveAsync(ItemModel item);
+        Task DeleteAsync(int id);
+    }
+
+    public interface IPrecoService
+    {
+        Task<List<PrecoModel>> GetByItemIdAsync(int itemId);
+        Task<PrecoModel> GetByIdAsync(int id);
+        Task<PrecoModel> SaveAsync(PrecoModel preco);
+        Task DeleteAsync(int id);
+    }
+
+    public interface ICategoriaService
+    {
+        Task<List<CategoriaModel>> GetAllAsync();
+        Task<CategoriaModel> GetByIdAsync(int id);
+        Task<CategoriaModel> SaveAsync(CategoriaModel categoria);
+        Task DeleteAsync(int id);
+    }
+}

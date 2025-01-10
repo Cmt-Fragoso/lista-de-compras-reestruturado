@@ -1,0 +1,150 @@
+using System;
+using System.ComponentModel;
+
+namespace ListaCompras.Core.Models
+{
+    public enum StatusLista
+    {
+        EmAndamento,
+        Concluida,
+        Cancelada
+    }
+
+    public class ItemModel : INotifyPropertyChanged
+    {
+        private int _id;
+        private string _nome;
+        private decimal _quantidade;
+        private string _unidade;
+        private decimal _preco;
+        private string _observacao;
+        private int _categoriaId;
+        private CategoriaModel _categoria;
+        private bool _isComprado;
+
+        public int Id 
+        { 
+            get => _id; 
+            set { _id = value; OnPropertyChanged(nameof(Id)); }
+        }
+        
+        public string Nome 
+        { 
+            get => _nome;
+            set { _nome = value; OnPropertyChanged(nameof(Nome)); }
+        }
+
+        public decimal Quantidade 
+        { 
+            get => _quantidade;
+            set { _quantidade = value; OnPropertyChanged(nameof(Quantidade)); OnPropertyChanged(nameof(Total)); }
+        }
+
+        public string Unidade 
+        { 
+            get => _unidade;
+            set { _unidade = value; OnPropertyChanged(nameof(Unidade)); }
+        }
+
+        public decimal Preco 
+        { 
+            get => _preco;
+            set { _preco = value; OnPropertyChanged(nameof(Preco)); OnPropertyChanged(nameof(Total)); }
+        }
+
+        public string Observacao 
+        { 
+            get => _observacao;
+            set { _observacao = value; OnPropertyChanged(nameof(Observacao)); }
+        }
+
+        public int CategoriaId 
+        { 
+            get => _categoriaId;
+            set { _categoriaId = value; OnPropertyChanged(nameof(CategoriaId)); }
+        }
+
+        public CategoriaModel Categoria 
+        { 
+            get => _categoria;
+            set { _categoria = value; OnPropertyChanged(nameof(Categoria)); }
+        }
+
+        public bool IsComprado 
+        { 
+            get => _isComprado;
+            set { _isComprado = value; OnPropertyChanged(nameof(IsComprado)); }
+        }
+
+        public decimal Total => Quantidade * Preco;
+
+        public static string[] UnidadesPadrao = new[] { "Un", "Kg", "g", "L", "ml", "m", "cm" };
+
+        public event PropertyChangedEventHandler PropertyChanged;
+
+        protected virtual void OnPropertyChanged(string propertyName = null)
+        {
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
+        }
+    }
+
+    public class PrecoModel : INotifyPropertyChanged
+    {
+        private int _id;
+        private int _itemId;
+        private ItemModel _item;
+        private decimal _valor;
+        private string _local;
+        private DateTime _data;
+        private string _observacao;
+
+        public int Id
+        {
+            get => _id;
+            set { _id = value; OnPropertyChanged(nameof(Id)); }
+        }
+
+        public int ItemId
+        {
+            get => _itemId;
+            set { _itemId = value; OnPropertyChanged(nameof(ItemId)); }
+        }
+
+        public ItemModel Item
+        {
+            get => _item;
+            set { _item = value; OnPropertyChanged(nameof(Item)); }
+        }
+
+        public decimal Valor
+        {
+            get => _valor;
+            set { _valor = value; OnPropertyChanged(nameof(Valor)); }
+        }
+
+        public string Local
+        {
+            get => _local;
+            set { _local = value; OnPropertyChanged(nameof(Local)); }
+        }
+
+        public DateTime Data
+        {
+            get => _data;
+            set { _data = value; OnPropertyChanged(nameof(Data)); }
+        }
+
+        public string Observacao
+        {
+            get => _observacao;
+            set { _observacao = value; OnPropertyChanged(nameof(Observacao)); }
+        }
+
+        public event PropertyChangedEventHandler PropertyChanged;
+
+        protected virtual void OnPropertyChanged(string propertyName = null)
+        {
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
+        }
+    }
+}

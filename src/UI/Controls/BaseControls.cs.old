@@ -1,0 +1,288 @@
+using System;
+using System.Drawing;
+using System.Windows.Forms;
+using System.ComponentModel;
+using ListaCompras.UI.Themes;
+
+namespace ListaCompras.UI.Controls
+{
+    public class BaseButton : Button
+    {
+        public override Color BackColor 
+        { 
+            get => base.BackColor;
+            set
+            {
+                base.BackColor = value;
+                Invalidate();
+            }
+        }
+
+        protected override void OnPaint(PaintEventArgs pevent)
+        {
+            var theme = ThemeManager.Instance.CurrentTheme;
+            var rect = ClientRectangle;
+            var g = pevent.Graphics;
+
+            using (var path = GetRoundedRectangle(rect, 6))
+            {
+                // Fundo
+                using (var brush = new SolidBrush(BackColor))
+                {
+                    g.FillPath(brush, path);
+                }
+
+                // Borda
+                if (Enabled)
+                {
+                    using var pen = new Pen(theme.Border);
+                    g.DrawPath(pen, path);
+                }
+            }
+
+            // Texto centralizado
+            TextRenderer.DrawText(g, Text, Font, rect, ForeColor, 
+                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+        }
+
+        private static System.Drawing.Drawing2D.GraphicsPath GetRoundedRectangle(Rectangle rect, int radius)
+        {
+            var path = new System.Drawing.Drawing2D.GraphicsPath();
+            var diameter = radius * 2;
+
+            var arcRect = new Rectangle(rect.Location, new Size(diameter, diameter));
+
+            // Top left
+            path.AddArc(arcRect, 180, 90);
+
+            // Top right
+            arcRect.X = rect.Right - diameter;
+            path.AddArc(arcRect, 270, 90);
+
+            // Bottom right
+            arcRect.Y = rect.Bottom - diameter;
+            path.AddArc(arcRect, 0, 90);
+
+            // Bottom left
+            arcRect.X = rect.Left;
+            path.AddArc(arcRect, 90, 90);
+
+            path.CloseFigure();
+            return path;
+        }
+    }
+
+    public class BaseTextBox : TextBox
+    {
+        private Color _borderColor;
+
+        public BaseTextBox()
+        {
+            BorderStyle = BorderStyle.None;
+            AutoSize = false;
+            ThemeManager.Instance.ThemeChanged += OnThemeChanged;
+            UpdateColors();
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            base.OnPaint(e);
+
+            using var pen = new Pen(_borderColor);
+            e.Graphics.DrawRectangle(pen, 0, 0, Width - 1, Height - 1);
+        }
+
+        private void OnThemeChanged(object sender, EventArgs e)
+        {
+            UpdateColors();
+            Invalidate();
+        }
+
+        private void UpdateColors()
+        {
+            var theme = ThemeManager.Instance.CurrentTheme;
+            _borderColor = theme.Border;
+            BackColor = theme.Surface;
+            ForeColor = theme.TextPrimary;
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                ThemeManager.Instance.ThemeChanged -= OnThemeChanged;
+            }
+            base.Dispose(disposing);
+        }
+    }
+
+    public class BaseComboBox : ComboBox
+    {
+        public BaseComboBox()
+        {
+            DrawMode = DrawMode.OwnerDrawFixed;
+            DropDownStyle = ComboBoxStyle.DropDownList;
+            ThemeManager.Instance.ThemeChanged += OnThemeChanged;
+            UpdateColors();
+        }
+
+        protected override void OnDrawItem(DrawItemEventArgs e)
+        {
+            e.DrawBackground();
+
+            if (e.Index >= 0)
+            {
+                var theme = ThemeManager.Instance.CurrentTheme;
+                var textColor = e.State.HasFlag(DrawItemState.Selected) ? 
+                    theme.TextPrimary : 
+                    theme.TextSecondary;
+
+                using var brush = new SolidBrush(textColor);
+                e.Graphics.DrawString(Items[e.Index].ToString(), 
+                    e.Font, brush, e.Bounds);
+            }
+
+            e.DrawFocusRectangle();
+        }
+
+        private void OnThemeChanged(object sender, EventArgs e)
+        {
+            UpdateColors();
+            Invalidate();
+        }
+
+        private void UpdateColors()
+        {
+            var theme = ThemeManager.Instance.CurrentTheme;
+            BackColor = theme.Surface;
+            ForeColor = theme.TextPrimary;
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                ThemeManager.Instance.ThemeChanged -= OnThemeChanged;
+            }
+            base.Dispose(disposing);
+        }
+    }
+
+    public class BaseListView : ListView
+    {
+        public BaseListView()
+        {
+            DoubleBuffered = true;
+            OwnerDraw = true;
+            ThemeManager.Instance.ThemeChanged += OnThemeChanged;
+            UpdateColors();
+        }
+
+        protected override void OnDrawColumnHeader(DrawListViewColumnHeaderEventArgs e)
+        {
+            var theme = ThemeManager.Instance.CurrentTheme;
+
+            e.Graphics.FillRectangle(new SolidBrush(theme.Surface), e.Bounds);
+            e.Graphics.DrawString(e.Header.Text, Font, 
+                new SolidBrush(theme.TextPrimary), e.Bounds);
+        }
+
+        protected override void OnDrawItem(DrawListViewItemEventArgs e)
+        {
+            var theme = ThemeManager.Instance.CurrentTheme;
+            var isSelected = e.Item.Selected;
+            var textColor = isSelected ? theme.TextPrimary : theme.TextSecondary;
+
+            e.Graphics.FillRectangle(
+                new SolidBrush(isSelected ? theme.Primary : theme.Background), 
+                e.Bounds);
+
+            e.Graphics.DrawString(e.Item.Text, Font, 
+                new SolidBrush(textColor), e.Bounds);
+
+            if (isSelected)
+            {
+                e.DrawFocusRectangle();
+            }
+        }
+
+        private void OnThemeChanged(object sender, EventArgs e)
+        {
+            UpdateColors();
+            Invalidate();
+        }
+
+        private void UpdateColors()
+        {
+            var theme = ThemeManager.Instance.CurrentTheme;
+            BackColor = theme.Background;
+            ForeColor = theme.TextPrimary;
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                ThemeManager.Instance.ThemeChanged -= OnThemeChanged;
+            }
+            base.Dispose(disposing);
+        }
+    }
+
+    public class BaseDataGrid : DataGridView
+    {
+        public BaseDataGrid()
+        {
+            BorderStyle = BorderStyle.None;
+            RowHeadersVisible = false;
+            AllowUserToAddRows = false;
+            AllowUserToDeleteRows = false;
+            AllowUserToOrderColumns = true;
+            AllowUserToResizeRows = false;
+            SelectionMode = DataGridViewSelectionMode.FullRowSelect;
+            MultiSelect = false;
+            ThemeManager.Instance.ThemeChanged += OnThemeChanged;
+            UpdateColors();
+        }
+
+        private void OnThemeChanged(object sender, EventArgs e)
+        {
+            UpdateColors();
+            Invalidate();
+        }
+
+        private void UpdateColors()
+        {
+            var theme = ThemeManager.Instance.CurrentTheme;
+
+            BackgroundColor = theme.Background;
+            ForeColor = theme.TextPrimary;
+            GridColor = theme.Border;
+
+            EnableHeadersVisualStyles = false;
+            ColumnHeadersDefaultCellStyle.BackColor = theme.Surface;
+            ColumnHeadersDefaultCellStyle.ForeColor = theme.TextPrimary;
+            ColumnHeadersDefaultCellStyle.SelectionBackColor = theme.Surface;
+            ColumnHeadersDefaultCellStyle.SelectionForeColor = theme.TextPrimary;
+
+            DefaultCellStyle.BackColor = theme.Background;
+            DefaultCellStyle.ForeColor = theme.TextPrimary;
+            DefaultCellStyle.SelectionBackColor = theme.Primary;
+            DefaultCellStyle.SelectionForeColor = theme.TextPrimary;
+
+            AlternatingRowsDefaultCellStyle.BackColor = theme.Surface;
+            AlternatingRowsDefaultCellStyle.ForeColor = theme.TextPrimary;
+            AlternatingRowsDefaultCellStyle.SelectionBackColor = theme.Primary;
+            AlternatingRowsDefaultCellStyle.SelectionForeColor = theme.TextPrimary;
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                ThemeManager.Instance.ThemeChanged -= OnThemeChanged;
+            }
+            base.Dispose(disposing);
+        }
+    }
+}
